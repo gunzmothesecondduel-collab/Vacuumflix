@@ -123,8 +123,22 @@ renditions cannot fit, preparation fails; choose a smaller rendition such as
 
 <!-- coderabbit-ai-generated-section:v1:918c2288479f44839360068d7fb013fe1c83f79c726a9c22f8597c3777d4c5f1 -->
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:369cae500ded231a71d1df02831af69b2d514bf6bc8f457064135eadbed622cd -->
+
 A rendition switch may require another complete download. Preparation logs appear
 with `[cache]`; startup can take as long as downloading and decrypting the title.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:a3d591e653aa7ca0f8623353245a025f88cbbf62c1f26ffc7d97297a0937cca2 -->
+
+Disk caching disables Fastplay and McClearen, which can delay license acquisition
+until playback begins. This allows the player to request a license before playback.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 -->
 Interrupted connections and network stalls retry at most twice, restarting the
 complete download and decryption. Reads paused by decryption do not count toward
 the 30-second network stall timeout. Cancelling playback also cancels retries.

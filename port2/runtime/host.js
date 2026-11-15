@@ -73,6 +73,10 @@ function loadChunk(fname, url) {
   if (process.env.BACKLOCAL !== '0') code = code.split('An=(0,(_||(_=t(18123))).useGetSubmitActionCallback)(ze,{loggingCommand:null,loggingViewName:Me,parentLoggingViewName:Be.loggingViewName,route:mn,serverState:bn,setState:Sn,trackingInfo:Ne,transitionState:wn}),').join('An=function(__o){return function(a1,a2){var __done=!1,__go=function(){if(__done)return;__done=!0;try{var __h=t(98221);xn(__h.historyInsert({clViewName:null,pathname:"/welcomeContentLanding"},0));setTimeout(function(){try{xn(__h.historyPop())}catch(e){}},40)}catch(e){globalThis.__mark("[backlocal-err]",String(e))}},__r;try{__r=__o(a1,a2)}catch(e){__go();return}Promise.resolve(__r).then(function(){setTimeout(__go,30)},function(){__go()});setTimeout(__go,6000);return __r}}((0,(_||(_=t(18123))).useGetSubmitActionCallback)(ze,{loggingCommand:null,loggingViewName:Me,parentLoggingViewName:Be.loggingViewName,route:mn,serverState:bn,setState:Sn,trackingInfo:Ne,transitionState:wn})),');
   if (process.env.LICDBG && /nrdjs/.test(fname)) { try{ require('fs').writeFileSync('/tmp/nrdjs_dump.js', code); }catch{} }
   if (/nrdjs/.test(fname)) {
+    if (process.env.VACUUMFLIX_DISK_CACHE === '1') {
+      try { code = require('./cache-player').patchPlayer(code); }
+      catch (e) { console.error('[cache]', e.message); return false; }
+    }
     if (limit720) {
       try { code = resolution.patchPlayer(code); }
       catch (e) { console.error('[video]', e.message); return false; }
