@@ -3,7 +3,7 @@ const cp = require('child_process'), fs = require('fs');
 
 if (process.argv[2] !== 'worker') {
   const { test } = require('node:test');
-  for (const mode of ['clear', 'widevine', 'rgba', 'retry', 'retry-partial', 'required-fail', 'required-unavailable', 'gpu-success', 'init-switch', 'init-only-eos', 'disk-cache', 'disk-widevine', 'disk-gpu']) {
+  for (const mode of ['clear', 'widevine', 'rgba', 'retry', 'retry-partial', 'required-fail', 'required-unavailable', 'gpu-success', 'init-switch', 'init-only-eos', 'disk-cache', 'disk-widevine', 'disk-gpu', 'audio-sync', 'audio-sync-no-video']) {
     test('video pipeline: ' + mode, () => {
       const result = cp.spawnSync(process.execPath, [__filename, 'worker', mode], { encoding: 'utf8', timeout: 12000 });
       assert.equal(result.status, 0, result.stdout + result.stderr);
@@ -25,6 +25,24 @@ if (process.argv[2] !== 'worker') {
     const init = Buffer.from(mp4.subarray(0, boundary)), frag = mp4.subarray(boundary);
     let attempts = 0;
     let decoderSpawns = 0; const events = [];
+    let videoOutput = false, audioStarted = false, audioStartedEarly = false;
+    if (mode.startsWith('audio-sync')) {
+      const spawn = cp.spawn;
+      cp.spawn = (bin, args, opts) => {
+        if (bin !== 'ffmpeg') return spawn(bin, args, opts);
+        if (args.includes('pulse')) {
+          audioStartedEarly = !videoOutput;
+          audioStarted = true;
+          return spawn(process.execPath, ['-e', "process.stdin.resume(); process.stdin.on('end', () => process.exit(0))"], opts);
+        }
+        const videoScript = mode === 'audio-sync-no-video'
+          ? "process.stdin.resume(); process.stdin.on('end', () => process.exit(0))"
+          : `process.stdin.resume(); setTimeout(() => process.stdout.write(Buffer.alloc(${frameSize * count})), 700); process.stdin.on('end', () => setTimeout(() => process.exit(0), 1000))`;
+        const video = spawn(process.execPath, ['-e', videoScript], opts);
+        video.stdout.on('data', () => { videoOutput = true; });
+        return video;
+      };
+    }
     if (mode.startsWith('init-')) {
       const spawn = cp.spawn; cp.spawn = (...args) => { decoderSpawns++; return spawn(...args); };
     }
@@ -88,6 +106,12 @@ if (process.argv[2] !== 'worker') {
     const player = await new Promise(resolve => media.factory.createPlayer(process.pid, r => resolve(r.player)));
     const sid = media.base.createMediaSource(null, player.path).sourceid;
     const bid = media.base.createSourceBuffers(sid, [1]).bufferids[0];
+    if (mode.startsWith('audio-sync')) {
+      const audio = media.base.createSourceBuffers(sid, [0]).bufferids[0];
+      media.base.attachDataToSourceBuffer(init, sid, audio);
+      media.base.attachDataToSourceBuffer(frag, sid, audio);
+      media.base.endOfStream(audio);
+    }
     if (mode.startsWith('disk-')) {
       const url = 'http://127.0.0.1:' + server.address().port + '/protected.mp4';
       media.base.createRequest(1, 1, url, 0, boundary - 1, 0);
@@ -125,11 +149,17 @@ if (process.argv[2] !== 'worker') {
         assert.equal(player.state, player.STOPPED); assert.equal(attempts, mode === 'required-fail' ? 1 : 0);
         assert(!fs.existsSync(file)); return;
       }
+      if (mode === 'audio-sync-no-video') {
+        while (!audioStarted && Date.now() - start < 5000) await new Promise(r => setTimeout(r, 20));
+        assert(audioStarted, 'audio can start once an empty video stream has ended');
+        assert(!videoOutput); return;
+      }
       while (Date.now() - start < 7000) {
         try { frame = fs.readFileSync(file); if (frame.readUInt32LE(8) === count) break; } catch {}
         await new Promise(r => setTimeout(r, 20));
       }
       assert(frame, 'a frame was presented'); assert.equal(frame.readUInt32LE(8), count, 'all frames presented once');
+      if (mode === 'audio-sync') { assert(audioStarted, 'audio eventually starts'); assert(!audioStartedEarly, 'audio must wait for the first decoded video frame'); }
       assert.equal(frame.readUInt32LE(0), mode === 'rgba' ? w : (0x80000000 + w));
       assert.equal(frame.length, 12 + (mode === 'rgba' ? w*h*4 : frameSize));
       if (mode === 'widevine' || mode === 'disk-widevine') assert.equal(frame[12], 81, 'Widevine planar pixels pass through unchanged');

@@ -208,8 +208,11 @@ module.exports = function make(ctx) {
       const segs = []; let cursor = 0, cur = null, si = 0, proc = null, fed = 0, dead = false, done = false, waitDrain = false, software = false;
       const c = { kind, kill() { dead = true; if (proc) { try { proc.kill('SIGKILL'); } catch {} } }, signal(sg) { if (proc) try { proc.kill(sg); } catch {} }, get done() { return done; } };
       function audioGate(sg) {
+        if (!pipe || paused) return false;
+        // FFmpeg audio runs on its own clock. Wait until video has established
+        // its presentation clock, or audio gets a head start on slow decoders.
+        if (pr.clock0 === null) return pipe.chains.some(c => c.kind === 'video' && c.done);
         const now = Date.now(); sg.gateT0 = sg.gateT0 || now;
-        if (pr.clock0 === null || !pipe || paused) return true;
         if (now - sg.gateT0 > 2500) return true;
         if (sg.sessStart === undefined) return now - sg.gateT0 > 600;
         const d = sg.sessStart - base.__curPts / 1000;
