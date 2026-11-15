@@ -195,14 +195,15 @@ module.exports = function make(ctx) {
         pr.lastPts = f.pts;
         const due = pr.clock0 + (f.pts - pr.first) * 1000;
         if (now - due > pr.st.lagMax) pr.st.lagMax = now - due;
-        if (now > due + 1500) { pr.st.reanchor++; pr.clock0 = now + 60 - (f.pts - pr.first) * 1000; continue; }
-        if (now > due + 90 && pr.q.length > 1) { pr.st.drop++; pr.q.shift(); f.rel && f.rel(f.frame); continue; }
+        // Audio continues on its own clock during a slow decode. Keep the
+        // video deadline fixed and discard late frames so it can catch up.
+        if (now > due + 90) { pr.st.drop++; pr.q.shift(); f.rel && f.rel(f.frame); continue; }
         if (now >= due - 4) { pr.st.shown++; pr.q.shift(); f.st.onFrame(f.sz, f.frame, Math.round((f.pts - pr.first) * 1000), f.pts, f.sess); f.rel && f.rel(f.frame); continue; }
         pr.timer = setTimeout(() => { pr.timer = null; prRun(); }, Math.max(1, due - now)); break;
       }
       if (pr.q.length < 3) for (const sr of pr.srcs) { try { sr.stdout.resume(); } catch {} }
     }
-    function prEnqueue(st, sz, frame, pts, src, rel, sess) { pr.st.in++; pr.src = src; pr.srcs.add(src); pr.q.push({ st, sz, frame, pts, sess }); if (pr.q.length >= 6) { try { src.stdout.pause(); } catch {} } prRun(); }
+    function prEnqueue(st, sz, frame, pts, src, rel, sess) { pr.st.in++; pr.src = src; pr.srcs.add(src); pr.q.push({ st, sz, frame, pts, sess, rel }); if (pr.q.length >= 6) { try { src.stdout.pause(); } catch {} } prRun(); }
 
     function makeChain(b, kind, st) {
       const segs = []; let cursor = 0, cur = null, si = 0, proc = null, fed = 0, dead = false, done = false, waitDrain = false, software = false;
