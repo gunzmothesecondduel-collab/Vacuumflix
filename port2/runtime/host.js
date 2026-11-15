@@ -5,9 +5,9 @@ const path = require('path');
 const vm = require('vm');
 const cp = require('child_process');
 const resolution = require('./resolution');
-const limit720 = process.env.VACUUMFLIX_MAX_RESOLUTION === '720';
-if (limit720) console.log('[video] Playback limited to 1280x720');
-else if (process.env.VACUUMFLIX_MAX_RESOLUTION) console.warn('[video] VACUUMFLIX_MAX_RESOLUTION supports only 720; using the default limit');
+const limitResolution = ['480', '720'].includes(process.env.VACUUMFLIX_MAX_RESOLUTION) ? Number(process.env.VACUUMFLIX_MAX_RESOLUTION) : null;
+if (limitResolution) console.log('[video] Playback limited to ' + (limitResolution === 480 ? '854x480' : '1280x720'));
+else if (process.env.VACUUMFLIX_MAX_RESOLUTION) console.warn('[video] VACUUMFLIX_MAX_RESOLUTION supports 480 or 720; using the default limit');
 
 process.on('unhandledRejection', e=>{ console.log('\n[UNHANDLED REJECTION]\n'+((e&&e.stack)||e)); });
 process.on('uncaughtException', e=>{ console.log('\n[UNCAUGHT]\n'+((e&&e.stack)||e)); });
@@ -77,7 +77,7 @@ function loadChunk(fname, url) {
       try { code = require('./cache-player').patchPlayer(code); }
       catch (e) { console.error('[cache]', e.message); return false; }
     }
-    if (limit720) {
+    if (limitResolution) {
       try { code = resolution.patchPlayer(code); }
       catch (e) { console.error('[video]', e.message); return false; }
     }
@@ -100,7 +100,7 @@ function loadChunk(fname, url) {
     if (process.env.MANIFESTREQ) { const mr='i(e);var s=e.viewableIds;e.viewableIds=void 0;'; if (code.includes(mr)) code = code.replace(mr,'globalThis.__mark("[MANIFESTREQ]",JSON.stringify(e));'+mr); else console.log('[host] AVISO: patch MANIFESTREQ nao aplicou'); }
     if (process.env.ASEHIGH !== '0') {
       const dt='defaultThroughput:["defaultThroughput",1537]'; if (code.includes(dt)) code = code.replace(dt,'defaultThroughput:["defaultThroughput",30000]'); else console.log('[host] AVISO: patch defaultThroughput nao aplicou');
-      if (!limit720) { const mv='minInitVideoBitrate:["minInitVideoBitrate",-1/0]'; if (code.includes(mv)) code = code.replace(mv,'minInitVideoBitrate:["minInitVideoBitrate",2500]'); else console.log('[host] AVISO: patch minInitVideoBitrate nao aplicou'); }
+      if (!limitResolution) { const mv='minInitVideoBitrate:["minInitVideoBitrate",-1/0]'; if (code.includes(mv)) code = code.replace(mv,'minInitVideoBitrate:["minInitVideoBitrate",2500]'); else console.log('[host] AVISO: patch minInitVideoBitrate nao aplicou'); }
     }
     if (process.env.LICCACHE !== '1') { const n0 = (code.match(/\b[\w$]+(?:\.A)?\.useLicenseCache\b/g) || []).length; code = code.replace(/\b[\w$]+(?:\.A)?\.useLicenseCache\b/g, '(!1)'); code = code.replace('useLicenseCache:[["uselc","useLicenseCache"],!0]','useLicenseCache:[["uselc","useLicenseCache"],!1]'); console.log('[host] LICCACHE off:', n0, 'leituras'); }
     if (process.env.KODIID !== '0') {
@@ -630,7 +630,7 @@ if (label==='darwinBootstrap.js') { Object.defineProperty(nrdpReal.gibbon.Widget
     get(){ return this.__ts; }, set(v){ if (v && typeof v==='object') this.__ts = Object.assign({}, this.__ts||{}, v); else this.__ts = v; } }); }
 if (label==='darwinBootstrap.js') { const WP=nrdpReal.gibbon.Widget.prototype; for (const a of ['minWidth','minHeight','maxWidth','maxHeight','layoutSpacing','padding']) Object.defineProperty(WP, a, { configurable:true, enumerable:true, get(){ return this.__p[a]; }, set(v){ this.__p[a]=v; } }); }
 const sandbox = {};
-sandbox.__limitVideoResolution = resolution.limitManifest;
+sandbox.__limitVideoResolution = manifest => resolution.limitManifest(manifest, limitResolution || 720);
 sandbox.globalThis = sandbox; sandbox.self = sandbox; sandbox.window = sandbox; sandbox.global = sandbox;
 sandbox.nrdp = nrdp;
 if (!process.env.NOBOOTURL) nrdpReal.bootURL = 'http://localcontrol.netflix.com/js/boot.js';

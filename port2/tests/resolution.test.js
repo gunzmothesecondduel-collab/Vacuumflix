@@ -5,13 +5,13 @@ const { patchPlayer, limitManifest } = require('../runtime/resolution');
 
 const ext = path.join(__dirname, '../../tvui/apps/gibbontvui/20261016_37301/release/ext');
 const bundles = fs.readdirSync(ext).filter(f => f.includes('nrdjs.min.js'));
-function player(bundle, enabled) {
+function player(bundle, enabled, height = 720) {
   let code = fs.readFileSync(path.join(ext, bundle), 'utf8');
   if (enabled) code = patchPlayer(code);
   const start = code.indexOf('_makePlayerManifest:function(e)');
   const end = code.indexOf(',_verifyVideoTracks:function', start);
   assert(start >= 0 && end > start, 'find real player manifest builder');
-  return vm.runInNewContext('({' + code.slice(start, end) + '})', { __limitVideoResolution: limitManifest });
+  return vm.runInNewContext('({' + code.slice(start, end) + '})', { __limitVideoResolution: manifest => limitManifest(manifest, height) });
 }
 function fixture() {
   return { movieId: 1, duration: 100, locations: [], servers: [], audio_tracks: [{ streams: [{ id: 'audio' }] }],
@@ -70,4 +70,25 @@ test('player profile remapping still works after the cap and leaves the source u
     assert.equal(original.video_tracks[0].profile, undefined);
     assert.equal(original.video_tracks[0].streams[0].content_profile, undefined);
   }
+});
+
+test('480p cap filters each track on the bundled players without changing source or DRM', () => {
+  for (const bundle of bundles) {
+    const original = fixture();
+    original.video_tracks[0].streams.push({ id: 'wide-sd', res_w: 854, res_h: 480 }, { id: 'too-wide', res_w: 960, res_h: 400 });
+    original.video_tracks[1].streams.push({ id: 'camel-sd', resW: 720, resH: 480 });
+    const snapshot = JSON.stringify(original);
+    const result = player(bundle, true, 480)._makePlayerManifest(original);
+    assert.deepEqual(Array.from(result.video_tracks[0].streams, s => s.id), ['sd', 'wide-sd']);
+    assert.deepEqual(Array.from(result.video_tracks[1].streams, s => s.id), ['camel-sd']);
+    assert.deepEqual(result.video_tracks[0].drmHeader, original.video_tracks[0].drmHeader);
+    assert.equal(JSON.stringify(original), snapshot);
+  }
+});
+
+test('480p cap rejects HD-only tracks without modifying the manifest', () => {
+  const original = fixture(), snapshot = JSON.stringify(original);
+  assert.throws(() => limitManifest(original, 480), /480p limit:.*854x480/);
+  assert.equal(JSON.stringify(original), snapshot);
+  assert.throws(() => limitManifest(original, 360), /Unsupported playback resolution limit/);
 });

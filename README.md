@@ -74,7 +74,18 @@ Building on an immutable distro such as Bazzite has not been tested; use a `dist
 Set `VACUUMFLIX_MAX_RESOLUTION=720` to select Netflix video streams up to
 1280×720. Lower resolutions remain available for adaptive playback. If a video
 track has no eligible stream, playback reports an error instead of selecting a
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:fd842695764c5a50a858aeb0acc9b1318a15ad2fe47ca3e5e2156fb9d17753f0 -->
+
 higher resolution. Unset the variable to use the normal limit (up to 1080p).
+
+For slower CPUs, `VACUUMFLIX_MAX_RESOLUTION=480` selects streams up to 854×480.
+This reduces decoding work; real-time playback on a Celeron N3050 remains
+unverified. Use the normal CDM decoder with disk caching off when decrypt-only
+playback reports an unusable key.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ```sh
 VACUUMFLIX_MAX_RESOLUTION=720 ./netflix
