@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
-const { patchPlayer, limitManifest } = require('../runtime/resolution');
+const { patchPlayer, limitManifest, limitSource } = require('../runtime/resolution');
 
 const ext = path.join(__dirname, '../../tvui/apps/gibbontvui/20261016_37301/release/ext');
 const bundles = fs.readdirSync(ext).filter(f => f.includes('nrdjs.min.js'));
@@ -91,4 +91,66 @@ test('480p cap rejects HD-only tracks without modifying the manifest', () => {
   assert.throws(() => limitManifest(original, 480), /480p limit:.*854x480/);
   assert.equal(JSON.stringify(original), snapshot);
   assert.throws(() => limitManifest(original, 360), /Unsupported playback resolution limit/);
+});
+
+function normalize(bundle, manifest, height, enabled = true) {
+  let code = fs.readFileSync(path.join(ext, bundle), 'utf8');
+  if (enabled) code = patchPlayer(code);
+  const start = code.indexOf('eM(c,d),');
+  const end = code.indexOf(',F.A.isAtLeast4_2', start);
+  assert(start >= 0 && end > start);
+  const context = { c: manifest, d: {},
+    eM(c) { if (c.videoTracks) { c.video_tracks = c.videoTracks; delete c.videoTracks; } },
+    __limitVideoSource: c => limitSource(c, height),
+    eE: { error() { throw new Error('missing normalized tracks'); } },
+  };
+  vm.runInNewContext(code.slice(start, end), context);
+  return manifest;
+}
+
+test('JSASE response processing caps streams before constructing shared track indexes', () => {
+  for (const bundle of bundles) for (const height of [480, 720]) {
+    const m = fixture();
+    m.video_tracks[1].streams.push({ id: 'sd2', res_w: 640, res_h: 480 });
+    const video = m.video_tracks, audio = m.audio_tracks, drm = video[0].drmHeader;
+    // Exercise the v3 alias arriving before normalization.
+    m.videoTracks = video; delete m.video_tracks;
+    normalize(bundle, m, height);
+    assert.equal(m.video_tracks, video);
+    assert.equal(m.audio_tracks, audio);
+    assert.equal(m.tracks[0], video[0]);
+    assert.equal(m.tracks[1], video[1]);
+    assert.equal(m.tracks[2], audio[0]);
+    assert.equal(video[0].drmHeader, drm);
+    for (const track of video) for (const stream of track.streams) {
+      assert((stream.res_h ?? stream.resH) <= height);
+      assert((stream.res_w ?? stream.resW) <= (height === 480 ? 854 : 1280));
+    }
+    const uncapped = normalize(bundle, fixture(), height, false);
+    assert(uncapped.tracks[0].streams.some(s => s.res_h === 1080));
+  }
+});
+
+test('JSASE cap rejects HD-only responses atomically and permits audio-only responses', () => {
+  const m = fixture(), snapshot = JSON.stringify(m);
+  assert.throws(() => limitSource(m, 480), /no stream at or below/);
+  assert.equal(JSON.stringify(m), snapshot);
+  const audio = { audio_tracks: [{ streams: [] }] };
+  assert.equal(limitSource(audio, 480), audio);
+  for (const bundle of bundles) {
+    const code = fs.readFileSync(path.join(ext, bundle), 'utf8');
+    assert.throws(() => patchPlayer(code.replace('eM(c,d),Array.isArray(c.video_tracks)', 'newResponseProcessor()')), /unsupported Netflix manifest processor/);
+  }
+});
+
+test('pre-existing shared indexes retain capped lists; detached indexes fail closed', () => {
+  const m = fixture(); m.tracks = m.video_tracks.concat(m.audio_tracks);
+  const tracks = m.tracks;
+  limitSource(m, 720);
+  assert.equal(m.tracks, tracks);
+  assert(!m.tracks[0].streams.some(s => s.res_h === 1080));
+  const detached = fixture(); detached.tracks = JSON.parse(JSON.stringify(detached.video_tracks));
+  const snapshot = JSON.stringify(detached);
+  assert.throws(() => limitSource(detached, 720), /detached video track indexes/);
+  assert.equal(JSON.stringify(detached), snapshot);
 });

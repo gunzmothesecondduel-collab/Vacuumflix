@@ -631,6 +631,7 @@ if (label==='darwinBootstrap.js') { Object.defineProperty(nrdpReal.gibbon.Widget
 if (label==='darwinBootstrap.js') { const WP=nrdpReal.gibbon.Widget.prototype; for (const a of ['minWidth','minHeight','maxWidth','maxHeight','layoutSpacing','padding']) Object.defineProperty(WP, a, { configurable:true, enumerable:true, get(){ return this.__p[a]; }, set(v){ this.__p[a]=v; } }); }
 const sandbox = {};
 sandbox.__limitVideoResolution = manifest => resolution.limitManifest(manifest, limitResolution || 720);
+sandbox.__limitVideoSource = manifest => resolution.limitSource(manifest, limitResolution || 720);
 sandbox.globalThis = sandbox; sandbox.self = sandbox; sandbox.window = sandbox; sandbox.global = sandbox;
 sandbox.nrdp = nrdp;
 if (!process.env.NOBOOTURL) nrdpReal.bootURL = 'http://localcontrol.netflix.com/js/boot.js';
