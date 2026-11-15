@@ -453,5 +453,5 @@ module.exports = function make(ctx) {
     createPlayer(index, cb) { const player = makePlayer(index); setImmediate(() => cb && cb({ success: true, path: player.path, player })); },
     destroyPlayer(i, cb) { if (cacheEnabled) players.get(i)?.close(); players.delete(i); cb && setImmediate(cb); },
   };
-  return { mediarequest: mr, base, factory, closeAll() { players.forEach(p => { try { p.close(); } catch {} }); for (const r of requests.values()) releaseRequest(r); cacheClosing = diskCache?.close() || Promise.resolve(); diskCache = null; } };
+  return { mediarequest: mr, base, factory, closeAll() { players.forEach(p => { try { p.close(); } catch {} }); for (const r of requests.values()) releaseRequest(r); if (diskCache) { cacheClosing = diskCache.close(); diskCache = null; } return cacheClosing; } };
 };

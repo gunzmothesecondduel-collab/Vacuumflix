@@ -518,6 +518,19 @@ const nrdpReal = {
   signup: { areCredentialsRequired:()=>false, addEventListener(){}, removeEventListener(){} },
   qa: {},
   resourceAcquired(){}, resourceReleased(){}, requestSuspend(){}, suspendComplete(){},
+  exit(code) {
+    const status = Number.isInteger(code) && code >= 0 && code <= 255 ? code : 0;
+    // Netflix uses 75 to request a foreground restart. The package launcher is
+    // not a supervisor, so use the existing in-process restart path.
+    if (status === 75) { setImmediate(() => globalThis.__reloadAsMember('restart')); return; }
+    if (globalThis.__exiting) return;
+    globalThis.__exiting = true;
+    setImmediate(() => {
+      const timer = setTimeout(() => process.exit(status), 2000);
+      Promise.resolve().then(() => __media.closeAll()).catch(e => console.error('[host] shutdown:', e.message))
+        .finally(() => { clearTimeout(timer); process.exit(status); });
+    });
+  },
   assert(c,m){ if(!c) console.log('[nrdp.assert]', m); }, addListener(){}, removeListener(){},
   debug: { assert(){}, setLevel(){}, enable(){} },
   cert: {}, drmsystem: (process.env.DRM_BACKEND==='wv' ? require('./wvbridge') : require('./cdmdrm')).make(),
@@ -557,7 +570,7 @@ const nrdpReal = {
     __uiVersion:'', setUIVersion(v){ this.__uiVersion=v; }, getUIVersion(){ return this.__uiVersion; },
     version:{ gibbon:{ scriptEngine:'v8', string:'2024.3' },
       components:{ platform:{ platformVersion:'2024.3', platformSystem:'Linux', platformType:'gibbon', platformName:'Darwin' }, gibbon:{ string:'2024.3', major:2024, minor:3, patch:0, rev:0, scriptEngine:'v8' } } },
-    capability: new Proxy({},{ get(_t,k){ if(typeof k!=='string') return undefined; if(k==='videoProfiles') return globalThis.__CA.from(['playready-h264bpl30-dash','playready-h264mpl30-dash','playready-h264mpl31-dash','playready-h264hpl30-dash','playready-h264hpl31-dash','playready-h264mpl40-dash','playready-h264hpl40-dash']); if(k==='audioProfiles') return globalThis.__CA.from(['heaac-2-dash','heaac-2hq-dash']); if(/(Profiles|Capabilities)$/.test(k)) return globalThis.__CA.from([]); if(/PoolSize$/.test(k)) return 8*1048576; if(k==='screensaverTimeoutDuration' && process.env.SSTIMEOUT) return +process.env.SSTIMEOUT; if(k==='voiceRoutingTokenType') return ''; if(/^(isPanel|hasMicrophone|hasNetflixButton|lowLatencyPlayer|vaatPlayer)$/.test(k)) return false; return true; } }),
+    capability: new Proxy({},{ get(_t,k){ if(typeof k!=='string') return undefined; if(k==='videoProfiles') return globalThis.__CA.from(['playready-h264bpl30-dash','playready-h264mpl30-dash','playready-h264mpl31-dash','playready-h264hpl30-dash','playready-h264hpl31-dash','playready-h264mpl40-dash','playready-h264hpl40-dash']); if(k==='audioProfiles') return globalThis.__CA.from(['heaac-2-dash','heaac-2hq-dash']); if(/(Profiles|Capabilities)$/.test(k)) return globalThis.__CA.from([]); if(/PoolSize$/.test(k)) return 8*1048576; if(k==='screensaverTimeoutDuration' && process.env.SSTIMEOUT) return +process.env.SSTIMEOUT; if(k==='voiceRoutingTokenType') return ''; if(/^(isPanel|hasMicrophone|hasNetflixButton|hasSuspend|lowLatencyPlayer|vaatPlayer)$/.test(k)) return false; return true; } }),
   },
   storage: {
     NO_DEVICE_ACCOUNT: 'NO_DEVICE_ACCOUNT',
@@ -852,7 +865,7 @@ globalThis.__reloadAsMember = (why)=>{
   if (globalThis.__restarting) return;
   globalThis.__restarting = true;
   if (why==='logout') { for (const k of ['NetflixId','SecureNetflixId']) jar.delete(k); jarSave(); }
-  console.log(why==='logout' ? '[logout] saiu da conta -> reiniciando o host como visitante' : why==='retry' ? '[retry] tela de erro: reiniciando o boot' : why==='msl' ? '[msl] reiniciando o boot' : '[login] cookies de membro detectados -> reiniciando o host como membro');
+  console.log(why==='logout' ? '[logout] saiu da conta -> reiniciando o host como visitante' : why==='retry' ? '[retry] tela de erro: reiniciando o boot' : why==='msl' ? '[msl] reiniciando o boot' : why==='restart' ? '[host] reiniciando a pedido da UI' : '[login] cookies de membro detectados -> reiniciando o host como membro');
   try{ __media.closeAll && __media.closeAll(); }catch{}
   try{ cp.spawn('sh', ['-c', 'sleep 0.5; kill -9 '+process.pid+' 2>/dev/null; sleep 0.2; exec "$0" "$@"', process.env.PKG_NODE || process.execPath, ...process.argv.slice(1)], { detached:true, stdio:'inherit', env:Object.assign({}, process.env, { FAKELOGIN:'', VIEWER_PID: String(viewerProc && viewerProc.pid || ''), MSLRETRY: why==='msl' ? String((+process.env.MSLRETRY||0)+1) : '' }), cwd:process.cwd() }).unref(); }catch(e){ console.log('[login] falha ao reiniciar', e.message); globalThis.__restarting = false; return; }
   globalThis.__restarting = true;
