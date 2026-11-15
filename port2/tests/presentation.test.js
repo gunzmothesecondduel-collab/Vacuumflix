@@ -22,25 +22,26 @@ function scheduler() {
   };
 }
 
-test('slow decoding drops a lone late frame without delaying the video clock', () => {
+test('slow decoding preserves the clock and presents periodic progress', () => {
   const s = scheduler();
   s.frame(0, 'first'); s.at(1060);
   const clock = s.pr.clock0;
   s.at(3000); s.frame(1 / 24, 'late');
   assert.equal(s.pr.clock0, clock, 'audio clock must not be abandoned under load');
+  assert.deepEqual(s.shown, ['first', 'late'], 'sustained overload must still report progress');
+  s.frame(2 / 24, 'drop');
   assert.equal(s.pr.st.drop, 1);
-  assert.deepEqual(s.shown, ['first']);
-  assert.deepEqual(s.released, ['first', 'late']);
+  assert.deepEqual(s.released, ['first', 'late', 'drop']);
   s.frame(2, 'caught up'); s.at(3060);
-  assert.deepEqual(s.shown, ['first', 'caught up']);
+  assert.deepEqual(s.shown, ['first', 'late', 'caught up']);
 });
 
 test('queued late frames are discarded and timely frames retain their deadline', () => {
   const s = scheduler();
   s.frame(0, 'first'); s.frame(1 / 24, 'second'); s.frame(2 / 24, 'third');
   s.at(1220);
-  assert.equal(s.pr.st.drop, 2);
-  assert.deepEqual(s.shown, ['third']);
+  assert.equal(s.pr.st.drop, 1);
+  assert.deepEqual(s.shown, ['first', 'third']);
   assert.equal(s.released.length, 3);
 });
 
@@ -48,4 +49,17 @@ test('a timestamp discontinuity still establishes a new deadline', () => {
   const s = scheduler(); s.frame(0, 'first'); s.at(1060);
   s.frame(20, 'seek'); s.at(1120);
   assert.deepEqual(s.shown, ['first', 'seek']);
+});
+
+// UI/image work on a slow CPU can delay the first presentation timer.
+test('late startup timer cannot discard every frame before the first update', () => {
+  const s = scheduler();
+  s.frame(0, 'first'); s.frame(1 / 24, 'second');
+  s.at(3000);
+  assert.deepEqual(s.shown, ['first']);
+  assert.equal(s.pr.clock0, 1060);
+  assert.equal(s.pr.st.drop, 1);
+  s.at(3300); s.frame(2 / 24, 'third');
+  assert.deepEqual(s.shown, ['first', 'third']);
+  assert.equal(s.pr.clock0, 1060);
 });

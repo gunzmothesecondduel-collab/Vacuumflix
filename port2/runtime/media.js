@@ -185,7 +185,7 @@ module.exports = function make(ctx) {
 
     const pr = { q: [], clock0: null, first: 0, timer: null, src: null, srcs: new Set(), pausedAt: 0, nextPts: undefined, st: { in: 0, shown: 0, drop: 0, reanchor: 0, lagMax: 0, t0: Date.now() } };
     if (process.env.MEDIALOG) setInterval(() => { const q = pr.st; if (q.in) { const sec = (Date.now() - q.t0) / 1000; mlog('vid-stats', 'dec_fps=' + (q.in / sec).toFixed(1), 'show_fps=' + (q.shown / sec).toFixed(1), 'drop=' + q.drop, 'reanc=' + q.reanchor, 'lagMax=' + Math.round(q.lagMax) + 'ms', 'fila=' + pr.q.length); pr.st = { in: 0, shown: 0, drop: 0, reanchor: 0, lagMax: 0, t0: Date.now() }; } }, 2000).unref();
-    const prReset = () => { pr.lastPts = undefined; clearTimeout(pr.timer); pr.timer = null; pr.q.length = 0; pr.clock0 = null; pr.src = null; pr.srcs.clear(); pr.nextPts = undefined; };
+    const prReset = () => { pr.lastPts = undefined; pr.lastShownAt = undefined; clearTimeout(pr.timer); pr.timer = null; pr.q.length = 0; pr.clock0 = null; pr.src = null; pr.srcs.clear(); pr.nextPts = undefined; };
     function prRun() {
       if (pr.timer || paused) return;
       while (pr.q.length) {
@@ -197,8 +197,10 @@ module.exports = function make(ctx) {
         if (now - due > pr.st.lagMax) pr.st.lagMax = now - due;
         // Audio continues on its own clock during a slow decode. Keep the
         // video deadline fixed and discard late frames so it can catch up.
-        if (now > due + 90) { pr.st.drop++; pr.q.shift(); f.rel && f.rel(f.frame); continue; }
-        if (now >= due - 4) { pr.st.shown++; pr.q.shift(); f.st.onFrame(f.sz, f.frame, Math.round((f.pts - pr.first) * 1000), f.pts, f.sess); f.rel && f.rel(f.frame); continue; }
+        // Keep presenting progress during sustained overload: updatepts drives
+        // the UI and further media requests, including completion of startup.
+        if (now > due + 90 && pr.lastShownAt !== undefined && now - pr.lastShownAt < 250) { pr.st.drop++; pr.q.shift(); f.rel && f.rel(f.frame); continue; }
+        if (now >= due - 4) { pr.lastShownAt = now; pr.st.shown++; pr.q.shift(); f.st.onFrame(f.sz, f.frame, Math.round((f.pts - pr.first) * 1000), f.pts, f.sess); f.rel && f.rel(f.frame); continue; }
         pr.timer = setTimeout(() => { pr.timer = null; prRun(); }, Math.max(1, due - now)); break;
       }
       if (pr.q.length < 3) for (const sr of pr.srcs) { try { sr.stdout.resume(); } catch {} }
