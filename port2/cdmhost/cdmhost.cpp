@@ -231,10 +231,16 @@ static bool find_child(const Bytes& b, const Box& parent, const char* type, Box&
     size_t pos = parent.off + parent.hdr + skip, end = parent.off + parent.size; Box x;
     while (next_box(b, pos, end, x)) { if (!strcmp(x.type, type)) { out = x; return true; } pos = x.off + x.size; } return false;
 }
-struct Track {
+struct EncryptionInfo {
     uint32_t scheme = 0;
     uint8_t kid[16] = {0}; uint8_t iv_size = 8; uint8_t crypt = 0, skip = 0; Bytes const_iv; bool protected_ = false;
+};
+struct Track : EncryptionInfo {
     std::map<uint32_t, bool> sample_protection;
+    std::map<uint32_t, std::map<uint32_t, bool>> descriptions;
+    std::map<uint32_t, std::map<uint32_t, EncryptionInfo>> encryption;
+    std::map<uint32_t, uint32_t> default_descriptions;
+    bool ambiguous_track_ids = false;
     bool video = false; int w = 0, h = 0; Bytes avcc; uint8_t profile_idc = 100;
 };
 static std::map<std::string, Track> g_tracks;
@@ -247,11 +253,19 @@ static bool process_init(Bytes& b, Track& t) {
     size_t tpos = moov.off + moov.hdr, tend = moov.off + moov.size; Box trak;
     while (next_box(b, tpos, tend, trak)) {
         if (!strcmp(trak.type, "trak")) {
+            uint32_t track_id = 0; Box tkhd;
+            if (find_child(b, trak, "tkhd", tkhd) && tkhd.size >= tkhd.hdr + 4) {
+                const uint8_t* p = &b[tkhd.off + tkhd.hdr];
+                size_t id_offset = p[0] == 1 ? 20 : 12;
+                if (p[0] <= 1 && tkhd.size >= tkhd.hdr + id_offset + 4) track_id = rd32(p + id_offset);
+            }
             Box mdia, minf, stbl, stsd;
             if (find_child(b, trak, "mdia", mdia) && find_child(b, mdia, "minf", minf) && find_child(b, minf, "stbl", stbl) && find_child(b, stbl, "stsd", stsd)) {
+                if (t.descriptions.count(track_id)) t.ambiguous_track_ids = true;
                 size_t epos = stsd.off + stsd.hdr + 8, eend = stsd.off + stsd.size; Box ent; uint32_t description = 0;
                 while (next_box(b, epos, eend, ent)) {
                     ++description; bool encrypted_entry = !strcmp(ent.type, "encv") || !strcmp(ent.type, "enca");
+                    EncryptionInfo info; bool have_tenc = false;
                     if (!strcmp(ent.type, "encv") || !strcmp(ent.type, "enca")) {
 
                         size_t fields = !strcmp(ent.type, "encv") ? 78 : 28; size_t cpos = ent.off + ent.hdr + fields, cend = ent.off + ent.size; Box sinf;
@@ -263,12 +277,16 @@ static bool process_init(Bytes& b, Track& t) {
                             if (!strcmp(sinf.type, "sinf")) {
                                 Box frma, schm, schi, tenc;
                                 if (find_child(b, sinf, "frma", frma)) memcpy(&b[ent.off + 4], &b[frma.off + frma.hdr], 4);
-                                if (find_child(b, sinf, "schm", schm)) t.scheme = rd32(&b[schm.off + schm.hdr + 4]);
+                                if (find_child(b, sinf, "schm", schm)) t.scheme = info.scheme = rd32(&b[schm.off + schm.hdr + 4]);
                                 if (find_child(b, sinf, "schi", schi) && find_child(b, schi, "tenc", tenc)) {
+                                    if (tenc.size < tenc.hdr + 24) return false;
                                     const uint8_t* p = &b[tenc.off + tenc.hdr]; uint8_t ver = p[0];
                                     if (ver >= 1) { t.crypt = p[5] >> 4; t.skip = p[5] & 15; }
                                     t.protected_ = p[6]; t.iv_size = p[7]; memcpy(t.kid, p + 8, 16);
-                                    if (t.protected_ && t.iv_size == 0) { uint8_t n = p[24]; t.const_iv.assign(p + 25, p + 25 + n); }
+                                    info.protected_ = p[6]; info.iv_size = p[7]; memcpy(info.kid, p + 8, 16);
+                                    if (ver >= 1) { info.crypt = p[5] >> 4; info.skip = p[5] & 15; }
+                                    if (t.protected_ && t.iv_size == 0) { if (tenc.size < tenc.hdr + 25 || tenc.size < tenc.hdr + 25 + p[24]) return false; uint8_t n = p[24]; t.const_iv.assign(p + 25, p + 25 + n); info.const_iv = t.const_iv; }
+                                    have_tenc = true;
                                 }
                                 memcpy(&b[sinf.off + 4], "free", 4);
                             }
@@ -276,11 +294,24 @@ static bool process_init(Bytes& b, Track& t) {
                         }
                     }
                     t.sample_protection[description] = encrypted_entry;
+                    t.descriptions[track_id][description] = encrypted_entry;
+                    if (have_tenc) t.encryption[track_id][description] = info;
                     epos = ent.off + ent.size;
                 }
             }
         }
         tpos = trak.off + trak.size;
+    }
+    Box mvex;
+    if (find_child(b, moov, "mvex", mvex)) {
+        size_t at = mvex.off + mvex.hdr; Box trex;
+        while (next_box(b, at, mvex.off + mvex.size, trex)) {
+            if (!strcmp(trex.type, "trex") && trex.size >= trex.hdr + 12) {
+                const uint8_t* p = &b[trex.off + trex.hdr];
+                t.default_descriptions[rd32(p + 4)] = rd32(p + 8);
+            }
+            at = trex.off + trex.size;
+        }
     }
     return true;
 }
@@ -401,7 +432,29 @@ static bool decrypt_segment(const Track& t, Bytes& seg, std::string& err, Bytes*
 
                 // A traf with no samples needs no per-sample encryption table.
                 if (!cnt) { tpos = traf.off + traf.size; continue; }
-                bool declared_clear = strict && (tf & 2) && t.sample_protection.count(description) && !t.sample_protection.at(description);
+                bool selected_clear = false; size_t description_count = 0;
+                if (strict && !t.descriptions.empty()) {
+                    if (t.ambiguous_track_ids) { err = "ambiguous MP4 track identifiers"; return false; }
+                    uint32_t track_id = rd32(th + 4);
+                    auto entries = t.descriptions.find(track_id);
+                    if (!track_id || entries == t.descriptions.end()) { err = "unknown MP4 fragment track"; return false; }
+                    description_count = entries->second.size();
+                    if (!(tf & 2)) {
+                        auto def = t.default_descriptions.find(track_id);
+                        if (def != t.default_descriptions.end()) description = def->second;
+                        else if (entries->second.size() == 1) description = entries->second.begin()->first;
+                        else { err = "missing default MP4 sample description"; return false; }
+                    }
+                    auto selected = entries->second.find(description);
+                    if (selected == entries->second.end()) { err = "unknown MP4 sample description"; return false; }
+                    selected_clear = !selected->second;
+                    if (!selected_clear) {
+                        auto enc_track = t.encryption.find(entries->first);
+                        if (enc_track == t.encryption.end() || !enc_track->second.count(description)) { err = "missing sample description encryption metadata"; return false; }
+                        static_cast<EncryptionInfo&>(crypto) = enc_track->second.at(description);
+                    }
+                }
+                bool declared_clear = selected_clear || (strict && (tf & 2) && t.descriptions.empty() && t.sample_protection.count(description) && !t.sample_protection.at(description));
                 std::vector<SampleEnc> encs(cnt);
                 bool have_senc = find_child(seg, traf, "senc", senc);
                 bool piff = !have_senc && find_piff_senc(seg, traf, senc);
@@ -492,7 +545,7 @@ static bool decrypt_segment(const Track& t, Bytes& seg, std::string& err, Bytes*
                         }
                         HDecrypted blk; cdm::Status st;
                         { std::lock_guard<std::mutex> l(g_cdm_mx); st = g_cdm->Decrypt(in, &blk); }
-                        if (st != cdm::kSuccess) { char ih[40]; for (int q = 0; q < 16; q++) snprintf(ih + q * 2, 3, "%02x", iv16[q]); std::string ss; for (size_t q = 0; q < e.subs.size() && q < 4; q++) ss += std::to_string(e.subs[q].clear_bytes) + "/" + std::to_string(e.subs[q].cipher_bytes) + " "; LOG("decrypt amostra %u/%u status=%d size=%u iv=%s ivsz=%u subs=%u[%s] scheme=%d pat=%u:%u", i, cnt, (int)st, ssz, ih, (unsigned)crypto.iv_size, (unsigned)e.subs.size(), ss.c_str(), (int)in.encryption_scheme, (unsigned)crypto.crypt, (unsigned)crypto.skip); err = "Decrypt status " + std::to_string((int)st); if (strict && st == cdm::kNoKey) err += "; fragment offset " + std::to_string(file_offset + moof_off) + ", sample " + std::to_string(i + 1) + "/" + std::to_string(cnt) + "; " + key_diagnostic(crypto.kid); return false; }
+                        if (st != cdm::kSuccess) { char ih[40]; for (int q = 0; q < 16; q++) snprintf(ih + q * 2, 3, "%02x", iv16[q]); std::string ss; for (size_t q = 0; q < e.subs.size() && q < 4; q++) ss += std::to_string(e.subs[q].clear_bytes) + "/" + std::to_string(e.subs[q].cipher_bytes) + " "; LOG("decrypt amostra %u/%u status=%d size=%u iv=%s ivsz=%u subs=%u[%s] scheme=%d pat=%u:%u", i, cnt, (int)st, ssz, ih, (unsigned)crypto.iv_size, (unsigned)e.subs.size(), ss.c_str(), (int)in.encryption_scheme, (unsigned)crypto.crypt, (unsigned)crypto.skip); err = "Decrypt status " + std::to_string((int)st); if (strict && st == cdm::kNoKey) { err += "; fragment offset " + std::to_string(file_offset + moof_off) + ", sample " + std::to_string(i + 1) + "/" + std::to_string(cnt); if (description_count) err += ", description " + std::to_string(description) + " of " + std::to_string(description_count); err += "; " + key_diagnostic(crypto.kid); } return false; }
                         cdm::Buffer* ob = blk.DecryptedBuffer(); if (!ob || ob->Size() != ssz) { err = "tamanho decriptado inesperado"; return false; }
                         memcpy(&seg[sp], ob->Data(), ssz); done++;
                     }
@@ -556,7 +609,7 @@ static int handle(uint32_t op, const std::vector<Bytes>& a, std::vector<Bytes>& 
         out.push_back(frames); out.push_back(Bytes(nt.begin(), nt.end())); return 0; }
     case OP_DECRYPT_SEG: {
         if (a.size() < 2) return 1; Track t; { std::lock_guard<std::mutex> l(g_trk_mx); auto it = g_tracks.find(S(a[0])); if (it == g_tracks.end()) { out.push_back(Bytes{ 'n', 'o', 'i', 'n', 'i', 't' }); return 1; } t = it->second; }
-        Bytes seg = a[1]; if (t.protected_ && !decrypt_segment(t, seg, err, nullptr, nullptr, a.size() > 2 ? strtoull(S(a[2]).c_str(), nullptr, 10) : 0, a.size() > 2)) { LOG("decrypt falhou: %s", err.c_str()); out.push_back(Bytes(err.begin(), err.end())); return 1; }
+        Bytes seg = a[1]; if ((t.protected_ || (a.size() > 2 && !t.encryption.empty())) && !decrypt_segment(t, seg, err, nullptr, nullptr, a.size() > 2 ? strtoull(S(a[2]).c_str(), nullptr, 10) : 0, a.size() > 2)) { LOG("decrypt falhou: %s", err.c_str()); out.push_back(Bytes(err.begin(), err.end())); return 1; }
         out.push_back(seg); return 0; }
     default: return 1;
     }

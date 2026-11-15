@@ -11,7 +11,7 @@ static const uint8_t TEST_PIFF_UUID[16]={0xa2,0x39,0x4f,0x52,0x5a,0x9b,0x4f,0x14
 // This mock checks what reaches the CDM; it does not simulate licensed Widevine.
 class RecordingCdm : public cdm::ContentDecryptionModule_10 {
 public:
-    int calls=0; Bytes iv, kid; cdm::EncryptionScheme scheme; cdm::Status result=cdm::kSuccess; std::vector<cdm::SubsampleEntry> subs;
+    int calls=0; Bytes iv, kid; cdm::EncryptionScheme scheme; cdm::Pattern pattern; cdm::Status result=cdm::kSuccess; std::vector<cdm::SubsampleEntry> subs;
     void Initialize(bool,bool,bool) override {}
     void GetStatusForPolicy(uint32_t,const cdm::Policy&) override {}
     void SetServerCertificate(uint32_t,const uint8_t*,uint32_t) override {}
@@ -22,7 +22,7 @@ public:
     void RemoveSession(uint32_t,const char*,uint32_t) override {}
     void TimerExpired(void*) override {}
     cdm::Status Decrypt(const cdm::InputBuffer_2& in,cdm::DecryptedBlock* out) override {
-        ++calls; iv.assign(in.iv,in.iv+in.iv_size); kid.assign(in.key_id,in.key_id+in.key_id_size); scheme=in.encryption_scheme;
+        ++calls; iv.assign(in.iv,in.iv+in.iv_size); kid.assign(in.key_id,in.key_id+in.key_id_size); scheme=in.encryption_scheme; pattern=in.pattern;
         subs.clear(); for (uint32_t i=0;i<in.num_subsamples;++i) subs.push_back(in.subsamples[i]);
         if (result != cdm::kSuccess) return result;
         auto* b=new HBuffer(in.data_size); for(uint32_t i=0;i<in.data_size;++i) b->Data()[i]=in.data[i]^0xff;
@@ -39,6 +39,77 @@ public:
     void OnStorageId(uint32_t,const uint8_t*,uint32_t) override {}
     void Destroy() override {}
 };
+static void test_sample_description_keys() {
+    RecordingCdm cdm; g_cdm=&cdm;
+    auto entry=[](uint8_t kid) {
+        Bytes frma={'a','v','c','1'}, schm(4); if(kid==22)schm.insert(schm.end(),{'c','b','c','s'});else schm.insert(schm.end(),{'c','e','n','c'});u32(schm,0);
+        Bytes tenc(24); tenc[0]=kid==22?1:0; tenc[5]=kid==22?0x19:0; tenc[6]=1; tenc[7]=kid==22?16:8; std::fill(tenc.begin()+8,tenc.end(),kid);
+        Bytes sinf=join(box("frma",frma),join(box("schm",schm),box("schi",box("tenc",tenc))));
+        return box("encv",join(Bytes(78),box("sinf",sinf)));
+    };
+    Bytes sd(4);u32(sd,2);sd=join(sd,join(entry(11),entry(22)));
+    Bytes tkhd(16); tkhd[15]=1;
+    Bytes trak=box("trak",join(box("tkhd",tkhd),box("mdia",box("minf",box("stbl",box("stsd",sd))))));
+    Bytes trex;u32(trex,0);u32(trex,1);u32(trex,1);u32(trex,0);u32(trex,0);u32(trex,0);
+    Bytes init=box("moov",join(trak,box("mvex",box("trex",trex))));
+    Track track;assert(process_init(init,track));
+    auto fragment=[](uint32_t desc, uint32_t track_id=1) {
+        Bytes tfhd;u32(tfhd,0x20010|(desc?2:0));u32(tfhd,track_id);if(desc)u32(tfhd,desc);u32(tfhd,4);
+        Bytes senc;u32(senc,0);u32(senc,1);senc.insert(senc.end(),desc==2?16:8,33);
+        Bytes trun;u32(trun,1);u32(trun,1);u32(trun,0);
+        auto moof=[&](){return box("moof",box("traf",join(box("tfhd",tfhd),join(box("trun",trun),box("senc",senc)))));};
+        auto m=moof();trun.resize(8);u32(trun,m.size()+8);return join(moof(),box("mdat",Bytes{1,2,3,4}));
+    };
+    std::string error;
+    for (uint32_t desc : {0u,1u,2u}) {
+        Bytes data=fragment(desc);
+        assert(decrypt_segment(track,data,error,nullptr,nullptr,0,true));
+        assert(cdm.kid[0]==(desc==2?22:11));
+        assert(cdm.scheme==(desc==2?cdm::EncryptionScheme::kCbcs:cdm::EncryptionScheme::kCenc));
+        assert(cdm.iv[15]==(desc==2?33:0));
+        assert(cdm.pattern.crypt_byte_block==(desc==2?1u:0u));
+        assert(cdm.pattern.skip_byte_block==(desc==2?9u:0u));
+    }
+    cdm.result=cdm::kNoKey;Bytes noKey=fragment(1);
+    assert(!decrypt_segment(track,noKey,error,nullptr,nullptr,0,true));
+    assert(error.find("description 1 of 2")!=std::string::npos);
+    cdm.result=cdm::kSuccess;
+    int before=cdm.calls;
+    Bytes bad=fragment(3);assert(!decrypt_segment(track,bad,error,nullptr,nullptr,0,true));
+    assert(error=="unknown MP4 sample description" && cdm.calls==before);
+    Track missing=track;missing.default_descriptions.clear();bad=fragment(0);
+    assert(!decrypt_segment(missing,bad,error,nullptr,nullptr,0,true));
+    assert(error=="missing default MP4 sample description" && cdm.calls==before);
+    Bytes empty=fragment(0);auto trun=std::search(empty.begin(),empty.end(),"trun","trun"+4);
+    assert(trun!=empty.end());std::fill(trun+8,trun+12,0);
+    assert(decrypt_segment(missing,empty,error,nullptr,nullptr,0,true));assert(cdm.calls==before);
+    Track noMetadata=track;noMetadata.encryption[1].erase(1);bad=fragment(1);
+    assert(!decrypt_segment(noMetadata,bad,error,nullptr,nullptr,0,true));
+    assert(error=="missing sample description encryption metadata" && cdm.calls==before);
+    Track ambiguous=track;ambiguous.ambiguous_track_ids=true;bad=fragment(1);
+    assert(!decrypt_segment(ambiguous,bad,error,nullptr,nullptr,0,true));
+    assert(error=="ambiguous MP4 track identifiers" && cdm.calls==before);
+    bad=fragment(1,99);assert(!decrypt_segment(track,bad,error,nullptr,nullptr,0,true));
+    assert(error=="unknown MP4 fragment track" && cdm.calls==before);
+    Track missingId=track;missingId.descriptions[0]=missingId.descriptions.at(1);missingId.descriptions.erase(1);
+    bad=fragment(1);assert(!decrypt_segment(missingId,bad,error,nullptr,nullptr,0,true));
+    assert(error=="unknown MP4 fragment track" && cdm.calls==before);
+    // The complete bridge path uses tfhd and trex to select keys by track.
+    Bytes sd2(4);u32(sd2,1);sd2=join(sd2,entry(33));Bytes tkhd2(16);tkhd2[15]=2;
+    Bytes trak2=box("trak",join(box("tkhd",tkhd2),box("mdia",box("minf",box("stbl",box("stsd",sd2))))));
+    Bytes trex2;u32(trex2,0);u32(trex2,2);u32(trex2,1);u32(trex2,0);u32(trex2,0);u32(trex2,0);
+    Bytes multi=box("moov",join(join(trak,trak2),box("mvex",join(box("trex",trex),box("trex",trex2)))));
+    std::vector<Bytes> result;
+    assert(handle(OP_SET_INIT,{Bytes{'m'},multi,Bytes{'d','e','c','r','y','p','t','-','o','n','l','y'}},result)==0);
+    for(uint32_t id : {1u,2u}) {
+        result.clear();assert(handle(OP_DECRYPT_SEG,{Bytes{'m'},fragment(0,id),Bytes{'0'}},result)==0);
+        assert(cdm.kid[0]==(id==1?11:33));
+    }
+    result.clear();assert(handle(OP_DROP_TRACK,{Bytes{'m'}},result)==0);
+    // Normal playback retains its original single-key handling.
+    Bytes legacy=fragment(2);assert(decrypt_segment(track,legacy,error));assert(cdm.kid[0]==22);
+    g_cdm=nullptr;
+}
 static void test_encryption_metadata() {
     RecordingCdm cdm; g_cdm=&cdm;
     Track track; track.protected_=true; track.iv_size=8; track.scheme=0x63656e63;
@@ -109,6 +180,7 @@ static void test_encryption_metadata() {
     g_cdm=nullptr;
 }
 int main() {
+    test_sample_description_keys();
     test_encryption_metadata();
     Bytes frma={'a','v','c','1'}, schm(4); schm.insert(schm.end(), {'c','e','n','c'}); u32(schm,0);
     Bytes tenc(24); tenc[6]=1; tenc[7]=8;
