@@ -3,7 +3,7 @@ const cp = require('child_process'), fs = require('fs');
 
 if (process.argv[2] !== 'worker') {
   const { test } = require('node:test');
-  for (const mode of ['clear', 'widevine', 'rgba', 'retry', 'retry-partial', 'required-fail', 'required-unavailable', 'gpu-success', 'init-switch', 'init-only-eos', 'disk-cache', 'disk-widevine', 'disk-gpu', 'audio-sync', 'audio-sync-no-video']) {
+  for (const mode of ['clear', 'widevine', 'rgba', 'retry', 'retry-partial', 'required-fail', 'required-unavailable', 'gpu-success', 'init-switch', 'init-only-eos', 'disk-cache', 'disk-widevine', 'disk-gpu', 'audio-sync', 'audio-sync-no-video', 'decrypt-retry', 'decrypt-fail']) {
     test('video pipeline: ' + mode, () => {
       const result = cp.spawnSync(process.execPath, [__filename, 'worker', mode], { encoding: 'utf8', timeout: 12000 });
       assert.equal(result.status, 0, result.stdout + result.stderr);
@@ -67,11 +67,19 @@ if (process.argv[2] !== 'worker') {
         return spawn(bin, args, opts);
       };
     }
-    if (mode === 'widevine' || mode === 'disk-widevine') {
+    if (mode === 'widevine' || mode === 'disk-widevine' || mode.startsWith('decrypt-')) {
       init.write('encv', init.indexOf('avc1'));
       const bridge = require('../runtime/cdmbridge');
       const plane = Buffer.concat([Buffer.alloc(w*h,81), Buffer.alloc(w*h/4,90), Buffer.alloc(w*h/4,240)]);
       bridge.call = async (op, args) => {
+        if (mode.startsWith('decrypt-')) {
+          if (op === bridge.OP.SET_INIT) { const clear = Buffer.from(init); clear.write('avc1', clear.indexOf('encv')); return { status: 0, rets: [clear, Buffer.alloc(16), Buffer.alloc(0)] }; }
+          assert.equal(op, bridge.OP.DECRYPT);
+          assert.equal(args[2], '0', 'streaming must select per-description encryption metadata');
+          attempts++;
+          if (mode === 'decrypt-fail' || attempts === 1) return { status: 1, rets: [Buffer.from(mode === 'decrypt-fail' ? 'Decrypt status 4' : 'Decrypt status 2')] };
+          return { status: 0, rets: [args[1]] };
+        }
         if (mode === 'disk-widevine') {
           if (op === bridge.OP.DROP_TRACK) return { status: 0, rets: [] };
           if (op === bridge.OP.SET_INIT) {
@@ -149,6 +157,13 @@ if (process.argv[2] !== 'worker') {
         assert.equal(player.state, player.STOPPED); assert.equal(attempts, mode === 'required-fail' ? 1 : 0);
         assert(!fs.existsSync(file)); return;
       }
+      if (mode === 'decrypt-fail') {
+        while (!events.includes('error') && Date.now() - start < 5000) await new Promise(r => setTimeout(r, 20));
+        assert(events.includes('error'), 'DRM failure must reach the UI');
+        assert.equal(player.state, player.STOPPED);
+        assert(!fs.existsSync(file), 'failed decryption must never produce a displayed frame');
+        assert.equal(attempts, 1, 'permanent failures are not retried'); return;
+      }
       if (mode === 'audio-sync-no-video') {
         while (!audioStarted && Date.now() - start < 5000) await new Promise(r => setTimeout(r, 20));
         assert(audioStarted, 'audio can start once an empty video stream has ended');
@@ -164,6 +179,7 @@ if (process.argv[2] !== 'worker') {
       assert.equal(frame.length, 12 + (mode === 'rgba' ? w*h*4 : frameSize));
       if (mode === 'widevine' || mode === 'disk-widevine') assert.equal(frame[12], 81, 'Widevine planar pixels pass through unchanged');
       if (mode.startsWith('retry')) assert.equal(attempts, 1);
+      if (mode === 'decrypt-retry') assert.equal(attempts, 2, 'missing keys are retried before decoding');
       if (mode === 'init-switch') assert.equal(decoderSpawns, 1);
       if (mode.startsWith('disk-')) {
         assert.equal(downloads, 2, 'one bootstrap header request and one full-file download');

@@ -341,7 +341,22 @@ module.exports = function make(ctx) {
                   }
                   if (fi) mlog('vdec-frag', 'samples=' + fi.samples, 'frames=' + gotN, 'tfdt=' + fi.tfdt, 'ts=' + sg.ts, 'dur=' + (fi.samples / (sg.fps || fps())).toFixed(3) + 's', 'perdidos=' + (fi.samples - gotN));
                 } else {
-                  if (sg.enc) { const r = await cdmb().call(cdmb().OP.DECRYPT, [trackKey, data]); if (r.status === 0) d = r.rets[0]; else mlog('DECRYPT falhou', String(r.rets[0])); }
+                  if (sg.enc) {
+                    const deadline = Date.now() + 30000;
+                    let r;
+                    do {
+                      if (dead) return;
+                      // Match the fragment's sample description, as the cache path does.
+                      // Preserve the file origin for absolute MP4 data offsets.
+                      const origin = part.kind === 'req' ? part.req.start : 0;
+                      r = await cdmb().call(cdmb().OP.DECRYPT, [trackKey, data, String(origin)]);
+                      if (r.status === 0 || !/^Decrypt status 2(?:;|$)/.test(String(r.rets[0])) || Date.now() >= deadline) break;
+                      await new Promise(resolve => setTimeout(resolve, 100));
+                    } while (true);
+                    if (dead) return;
+                    if (r.status !== 0) throw new Error('Widevine streaming decryption failed: ' + String(r.rets[0] || r.status));
+                    d = r.rets[0];
+                  }
                   if (fragInfo(d).samples > 0) sg.hasMedia = true;
                   const cachedRequest = part.kind === 'req' && part.req.cached ? part.req : null;
                   sg.chunks.push(cachedRequest ? { read: () => fixSdi(requestBody(cachedRequest)) } : fixSdi(d));
@@ -356,7 +371,7 @@ module.exports = function make(ctx) {
       };
       return c;
     }
-    const feed = () => { if (pipe) for (const c of pipe.chains) c.pump().catch(e => { mlog('pump erro', e && e.message); if (cacheEnabled) { console.error('[cache]', e.message); killPipe(); setState(ST.STOPPED); base.emit('error', { type: 'error', error: 'NFErr_DRMFailed', errormsg: e.message, time: mono() }); } }); };
+    const feed = () => { if (pipe) for (const c of pipe.chains) c.pump().catch(e => { mlog('pump erro', e && e.message); if (pipe) { console.error(cacheEnabled ? '[cache]' : '[media]', e.message); killPipe(); setState(ST.STOPPED); base.emit('error', { type: 'error', error: 'NFErr_DRMFailed', errormsg: e.message, time: mono() }); } }); };
     function startPipe() {
       const src = mySource(); if (!src) return false;
       const bs = src.buffers.map(i => buffers.get(i)); const vb = bs.find(b => b.type === 'video'), ab = bs.find(b => b.type === 'audio');
