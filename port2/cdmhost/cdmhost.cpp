@@ -354,6 +354,31 @@ static std::string fragment_boxes(const Bytes& b, const Box& traf) {
 }
 struct SampleEnc { Bytes iv; std::vector<cdm::SubsampleEntry> subs; };
 struct VRange { size_t from = 0, maxn = (size_t)-1, next = 0; bool partial = false; };
+// Report only whether the CDM has reported this key, never the key identifier.
+static std::string key_diagnostic(const uint8_t* kid) {
+    char hex[33]; for (int i = 0; i < 16; ++i) snprintf(hex + i * 2, 3, "%02x", kid[i]);
+    const std::string prefix = std::string(hex) + ":";
+    std::lock_guard<std::mutex> l(g_st_mx);
+    bool reported = false; std::string statuses;
+    for (const auto& session : g_keystatus) {
+        if (!session.second.empty()) reported = true;
+        size_t start = 0;
+        while (start < session.second.size()) {
+            size_t end = session.second.find(' ', start);
+            if (end == std::string::npos) end = session.second.size();
+            if (session.second.compare(start, prefix.size(), prefix) == 0) {
+                size_t slash = session.second.find('/', start + prefix.size());
+                if (slash < end) {
+                    if (!statuses.empty()) statuses += ",";
+                    statuses += session.second.substr(start + prefix.size(), slash - start - prefix.size());
+                }
+            }
+            start = end + 1;
+        }
+    }
+    if (!statuses.empty()) return "matching key status(es): " + statuses + " (0=usable)";
+    return reported ? "no reported key matches this sample" : "no CDM key statuses reported";
+}
 static bool decrypt_segment(const Track& t, Bytes& seg, std::string& err, Bytes* frames = nullptr, VRange* vr = nullptr, uint64_t file_offset = 0, bool strict = false) {
     size_t gi = 0;
     size_t pos = 0; Box mf; int done = 0;
@@ -467,7 +492,7 @@ static bool decrypt_segment(const Track& t, Bytes& seg, std::string& err, Bytes*
                         }
                         HDecrypted blk; cdm::Status st;
                         { std::lock_guard<std::mutex> l(g_cdm_mx); st = g_cdm->Decrypt(in, &blk); }
-                        if (st != cdm::kSuccess) { char ih[40]; for (int q = 0; q < 16; q++) snprintf(ih + q * 2, 3, "%02x", iv16[q]); std::string ss; for (size_t q = 0; q < e.subs.size() && q < 4; q++) ss += std::to_string(e.subs[q].clear_bytes) + "/" + std::to_string(e.subs[q].cipher_bytes) + " "; LOG("decrypt amostra %u/%u status=%d size=%u iv=%s ivsz=%u subs=%u[%s] scheme=%d pat=%u:%u", i, cnt, (int)st, ssz, ih, (unsigned)crypto.iv_size, (unsigned)e.subs.size(), ss.c_str(), (int)in.encryption_scheme, (unsigned)crypto.crypt, (unsigned)crypto.skip); err = "Decrypt status " + std::to_string((int)st); return false; }
+                        if (st != cdm::kSuccess) { char ih[40]; for (int q = 0; q < 16; q++) snprintf(ih + q * 2, 3, "%02x", iv16[q]); std::string ss; for (size_t q = 0; q < e.subs.size() && q < 4; q++) ss += std::to_string(e.subs[q].clear_bytes) + "/" + std::to_string(e.subs[q].cipher_bytes) + " "; LOG("decrypt amostra %u/%u status=%d size=%u iv=%s ivsz=%u subs=%u[%s] scheme=%d pat=%u:%u", i, cnt, (int)st, ssz, ih, (unsigned)crypto.iv_size, (unsigned)e.subs.size(), ss.c_str(), (int)in.encryption_scheme, (unsigned)crypto.crypt, (unsigned)crypto.skip); err = "Decrypt status " + std::to_string((int)st); if (strict && st == cdm::kNoKey) err += "; fragment offset " + std::to_string(file_offset + moof_off) + ", sample " + std::to_string(i + 1) + "/" + std::to_string(cnt) + "; " + key_diagnostic(crypto.kid); return false; }
                         cdm::Buffer* ob = blk.DecryptedBuffer(); if (!ob || ob->Size() != ssz) { err = "tamanho decriptado inesperado"; return false; }
                         memcpy(&seg[sp], ob->Data(), ssz); done++;
                     }

@@ -11,7 +11,7 @@ static const uint8_t TEST_PIFF_UUID[16]={0xa2,0x39,0x4f,0x52,0x5a,0x9b,0x4f,0x14
 // This mock checks what reaches the CDM; it does not simulate licensed Widevine.
 class RecordingCdm : public cdm::ContentDecryptionModule_10 {
 public:
-    int calls=0; Bytes iv, kid; cdm::EncryptionScheme scheme; std::vector<cdm::SubsampleEntry> subs;
+    int calls=0; Bytes iv, kid; cdm::EncryptionScheme scheme; cdm::Status result=cdm::kSuccess; std::vector<cdm::SubsampleEntry> subs;
     void Initialize(bool,bool,bool) override {}
     void GetStatusForPolicy(uint32_t,const cdm::Policy&) override {}
     void SetServerCertificate(uint32_t,const uint8_t*,uint32_t) override {}
@@ -24,6 +24,7 @@ public:
     cdm::Status Decrypt(const cdm::InputBuffer_2& in,cdm::DecryptedBlock* out) override {
         ++calls; iv.assign(in.iv,in.iv+in.iv_size); kid.assign(in.key_id,in.key_id+in.key_id_size); scheme=in.encryption_scheme;
         subs.clear(); for (uint32_t i=0;i<in.num_subsamples;++i) subs.push_back(in.subsamples[i]);
+        if (result != cdm::kSuccess) return result;
         auto* b=new HBuffer(in.data_size); for(uint32_t i=0;i<in.data_size;++i) b->Data()[i]=in.data[i]^0xff;
         b->SetSize(in.data_size); out->SetDecryptedBuffer(b); return cdm::kSuccess;
     }
@@ -66,6 +67,21 @@ static void test_encryption_metadata() {
         const char* marker=piff?"uuid":"senc";
         assert(std::search(data.begin(),data.end(),marker,marker+4)==data.end());
     }
+    // Report the key actually passed to the CDM, including PIFF overrides, without revealing it.
+    cdm.result=cdm::kNoKey;
+    Bytes missingKey=fragment(metadata(true,true));
+    assert(!decrypt_segment(track,missingKey,error,nullptr,nullptr,123,true));
+    assert(error.find("fragment offset 123, sample 1/1; no CDM key statuses reported")!=std::string::npos);
+    g_keystatus["test"]="00000000000000000000000000000000:0/sys0 ";
+    missingKey=fragment(metadata(true,true));
+    assert(!decrypt_segment(track,missingKey,error,nullptr,nullptr,123,true));
+    assert(error.find("no reported key matches this sample")!=std::string::npos);
+    g_keystatus["test"]="4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d:2/sys0 ";
+    missingKey=fragment(metadata(true,true));
+    assert(!decrypt_segment(track,missingKey,error,nullptr,nullptr,123,true));
+    assert(error.find("matching key status(es): 2 (0=usable)")!=std::string::npos);
+    assert(error.find("4d4d4d") == std::string::npos);
+    g_keystatus.clear(); cdm.result=cdm::kSuccess;
     // Damaged recognized tables must fail before sending samples to the CDM.
     int before=cdm.calls;
     Bytes bad=fragment(metadata(true,false,2));assert(!decrypt_segment(track,bad,error,nullptr,nullptr,0,true));

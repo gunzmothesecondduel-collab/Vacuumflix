@@ -6,8 +6,9 @@ const MAX_FRAGMENT = 64 * 1024 * 1024;
 
 // Same-size substitutions preserve the player's original MP4 byte ranges and sidx.
 class DecryptMp4 extends Transform {
-  constructor() {
+  constructor({ keyWaitMs = 30000 } = {}) {
     super(); this.track = 'cache-' + process.pid + '-' + (++serial);
+    this.keyWaitMs = keyWaitMs;
     this.parts = []; this.collected = 0; this.needed = 8; this.boxSize = 0; this.header = []; this.fragment = null;
     this.offset = 0; this.initialized = false; this.encrypted = false;
   }
@@ -39,11 +40,11 @@ class DecryptMp4 extends Transform {
       if (this.encrypted) {
         let result;
         // A header request can finish before its license response arrives.
-        const deadline = Date.now() + 30000;
+        const deadline = Date.now() + this.keyWaitMs;
         do {
           if (this.destroyed) throw new Error('MP4 preparation cancelled');
           result = await bridge.call(bridge.OP.DECRYPT, [this.track, fragment, String(this.fragmentOffset)]);
-          if (result.status === 0 || !/^Decrypt status 2$/.test(String(result.rets[0])) || Date.now() >= deadline) break;
+          if (result.status === 0 || !/^Decrypt status 2(?:;|$)/.test(String(result.rets[0])) || Date.now() >= deadline) break;
           await new Promise(r => setTimeout(r, 100));
         } while (true);
         if (result.status !== 0) throw new Error('Widevine cache decryption failed: ' + String(result.rets[0] || result.status));
