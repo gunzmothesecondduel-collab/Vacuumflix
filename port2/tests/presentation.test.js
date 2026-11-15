@@ -9,16 +9,17 @@ function scheduler() {
   const start = source.indexOf('    function prRun() {');
   const end = source.indexOf('    function makeChain(', start);
   assert(start >= 0 && end > start);
-  let now = 1000;
+  let now = 1000, audioPts = null;
   const shown = [], released = [], timers = [];
   const pr = { q: [], clock0: null, srcs: new Set(), st: { in: 0, shown: 0, drop: 0, reanchor: 0, lagMax: 0 } };
-  const context = { pr, paused: false, Date: { now: () => now }, mlog() {}, setTimeout(fn) { timers.push(fn); return timers.length; } };
+  const context = { pr, audioClock: { position: () => audioPts }, paused: false, Date: { now: () => now }, mlog() {}, setTimeout(fn) { timers.push(fn); return timers.length; } };
   vm.createContext(context); vm.runInContext(source.slice(start, end), context);
   const st = { onFrame(_sz, frame) { shown.push(frame); } };
   const src = { stdout: { pause() {}, resume() {} } };
   return { pr, shown, released,
-    at(time) { now = time; while (timers.length) timers.shift()(); },
-    frame(pts, frame) { context.prEnqueue(st, {}, frame, pts, src, f => released.push(f)); },
+    audio(pts) { audioPts = pts; },
+    at(time) { now = time; for (const fn of timers.splice(0)) fn(); },
+    frame(pts, frame, sess) { context.prEnqueue(st, {}, frame, pts, src, f => released.push(f), sess); },
   };
 }
 
@@ -62,4 +63,15 @@ test('late startup timer cannot discard every frame before the first update', ()
   s.at(3300); s.frame(2 / 24, 'third');
   assert.deepEqual(s.shown, ['first', 'third']);
   assert.equal(s.pr.clock0, 1060);
+});
+
+test('video follows the audio session clock despite host-clock delay', () => {
+  const s = scheduler();
+  s.audio(100); s.frame(0, 'first', 100);
+  assert.deepEqual(s.shown, ['first']);
+  s.frame(1 / 25, 'second', 100.04);
+  s.at(5000);
+  assert.deepEqual(s.shown, ['first'], 'host time cannot advance video past stalled audio');
+  s.audio(100.04); s.at(5040);
+  assert.deepEqual(s.shown, ['first', 'second']);
 });

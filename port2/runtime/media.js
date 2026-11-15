@@ -1,5 +1,6 @@
 const https = require('https'), http = require('http'), fs = require('fs'), path = require('path');
 const { videoAcceleration } = require('./gpu');
+const { AudioClock } = require('./audio-clock');
 const GPU_VIDEO = process.env.VACUUMFLIX_GPU_VIDEO !== '0';
 const DUMP = process.env.MEDIADUMP || null;
 if (DUMP) fs.mkdirSync(DUMP, { recursive: true });
@@ -183,9 +184,10 @@ module.exports = function make(ctx) {
     const isInit = (d) => d.length > 8 && d.toString('latin1', 4, 8) === 'ftyp' && d.indexOf('moov') > 0;
     const fps = () => (openArgs && openArgs.videoAttributes && openArgs.videoAttributes.frameRateValue) ? openArgs.videoAttributes.frameRateValue / (openArgs.videoAttributes.frameRateScale || 1) : 24;
 
+    const audioClock = new AudioClock();
     const pr = { q: [], clock0: null, first: 0, timer: null, src: null, srcs: new Set(), pausedAt: 0, nextPts: undefined, st: { in: 0, shown: 0, drop: 0, reanchor: 0, lagMax: 0, t0: Date.now() } };
     if (process.env.MEDIALOG) setInterval(() => { const q = pr.st; if (q.in) { const sec = (Date.now() - q.t0) / 1000; mlog('vid-stats', 'dec_fps=' + (q.in / sec).toFixed(1), 'show_fps=' + (q.shown / sec).toFixed(1), 'drop=' + q.drop, 'reanc=' + q.reanchor, 'lagMax=' + Math.round(q.lagMax) + 'ms', 'fila=' + pr.q.length); pr.st = { in: 0, shown: 0, drop: 0, reanchor: 0, lagMax: 0, t0: Date.now() }; } }, 2000).unref();
-    const prReset = () => { pr.lastPts = undefined; pr.lastShownAt = undefined; clearTimeout(pr.timer); pr.timer = null; pr.q.length = 0; pr.clock0 = null; pr.src = null; pr.srcs.clear(); pr.nextPts = undefined; };
+    const prReset = () => { audioClock.reset(); pr.lastPts = undefined; pr.lastShownAt = undefined; clearTimeout(pr.timer); pr.timer = null; pr.q.length = 0; pr.clock0 = null; pr.src = null; pr.srcs.clear(); pr.nextPts = undefined; };
     function prRun() {
       if (pr.timer || paused) return;
       while (pr.q.length) {
@@ -193,7 +195,10 @@ module.exports = function make(ctx) {
         if (pr.clock0 === null) { pr.clock0 = now + 60; pr.first = f.pts; pr.lastPts = undefined; }
         if (pr.lastPts !== undefined && Math.abs(f.pts - pr.lastPts) > 1.5) { mlog('pts-salto', 'ultimo=' + pr.lastPts.toFixed(2), 'novo=' + f.pts.toFixed(2), 'first=' + pr.first.toFixed(2), 'atraso=' + Math.round(now - (pr.clock0 + (f.pts - pr.first) * 1000)) + 'ms'); pr.clock0 = now + 60 - (f.pts - pr.first) * 1000; pr.lastSaltoAt = now; }
         pr.lastPts = f.pts;
-        const due = pr.clock0 + (f.pts - pr.first) * 1000;
+        const audioPts = audioClock.position();
+        const sessionPts = Number.isFinite(f.sess) ? f.sess : f.pts;
+        const due = audioPts === null ? pr.clock0 + (f.pts - pr.first) * 1000
+          : now + (sessionPts - audioPts) * 1000;
         if (now - due > pr.st.lagMax) pr.st.lagMax = now - due;
         // Audio continues on its own clock during a slow decode. Keep the
         // video deadline fixed and discard late frames so it can catch up.
@@ -201,7 +206,7 @@ module.exports = function make(ctx) {
         // the UI and further media requests, including completion of startup.
         if (now > due + 90 && pr.lastShownAt !== undefined && now - pr.lastShownAt < 250) { pr.st.drop++; pr.q.shift(); f.rel && f.rel(f.frame); continue; }
         if (now >= due - 4) { pr.lastShownAt = now; pr.st.shown++; pr.q.shift(); f.st.onFrame(f.sz, f.frame, Math.round((f.pts - pr.first) * 1000), f.pts, f.sess); f.rel && f.rel(f.frame); continue; }
-        pr.timer = setTimeout(() => { pr.timer = null; prRun(); }, Math.max(1, due - now)); break;
+        pr.timer = setTimeout(() => { pr.timer = null; prRun(); }, Math.max(1, Math.min(40, due - now))); break;
       }
       if (pr.q.length < 3) for (const sr of pr.srcs) { try { sr.stdout.resume(); } catch {} }
     }
@@ -209,7 +214,7 @@ module.exports = function make(ctx) {
 
     function makeChain(b, kind, st) {
       const segs = []; let cursor = 0, cur = null, si = 0, proc = null, fed = 0, dead = false, done = false, waitDrain = false, software = false;
-      const c = { kind, kill() { dead = true; if (proc) { try { proc.kill('SIGKILL'); } catch {} } }, signal(sg) { if (proc) try { proc.kill(sg); } catch {} }, get done() { return done; } };
+      const c = { kind, kill() { dead = true; if (audioClock.source === proc) audioClock.reset(); if (proc) { try { proc.kill('SIGKILL'); } catch {} } }, signal(sg) { if (proc) try { proc.kill(sg); } catch {} }, get done() { return done; } };
       function audioGate(sg) {
         if (!pipe || paused) return false;
         // FFmpeg audio runs on its own clock. Wait until video has established
@@ -250,10 +255,14 @@ module.exports = function make(ctx) {
           if (sg.raw && GPU_VIDEO) args.push('-c:v', 'copy');
           args.push('-pix_fmt', GPU_VIDEO ? 'yuv420p' : 'rgba', '-f', 'rawvideo', 'pipe:1');
         }
-        else args.push('-vn', '-ac', '2', '-ar', '48000', '-f', 'pulse', '-name', 'Netflix', '-stream_name', 'Netflix', '-buffer_duration', '100', 'Netflix');
+        else args.push('-vn', '-af', 'asetpts=PTS-STARTPTS', '-stats_period', '0.1', '-progress', 'pipe:3', '-ac', '2', '-ar', '48000', '-f', 'pulse', '-name', 'Netflix', '-stream_name', 'Netflix', '-buffer_duration', '100', 'Netflix');
         mlog('ffmpeg', kind, 'seg', si, sz);
-        proc = cp.spawn('ffmpeg', args, { stdio: ['pipe', 'pipe', 'pipe'], env: hw ? hw.env : process.env }); waitDrain = false; fed = sg.resumeFed || 0; sg.resumeFed = 0; const base = fed; let outN = 0;
+        proc = cp.spawn('ffmpeg', args, { stdio: kind === 'audio' ? ['pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'], env: hw ? hw.env : process.env }); waitDrain = false; fed = sg.resumeFed || 0; sg.resumeFed = 0; const chunkBase = fed; let outN = 0;
         const me = proc; CHILDREN.add(me); me.on('exit', () => CHILDREN.delete(me));
+        if (kind === 'audio') {
+          audioClock.start(me, sg.sessStart ?? (base.__curPts || 0) / 1000);
+          me.stdio[3].on('data', chunk => { if (!dead && proc === me) audioClock.update(me, chunk); });
+        }
         let ffError = '';
         me.on('error', e => { ffError = (ffError + '\n' + e.message).slice(-4096); });
         me.stderr.on('data', d => {
@@ -266,9 +275,9 @@ module.exports = function make(ctx) {
           const rel = (b) => { if (b.length === fsz && pool.length < 4) pool.push(b); };
           me.stdout.on('data', d => { let o = 0;
             while (o < d.length) { const n = Math.min(fsz - off, d.length - o); d.copy(cur, off, o, o + n); off += n; o += n;
-              if (off === fsz) { outN++; if (outN === 1 && hw && hw.enabled) console.log('[gpu] FFmpeg VA-API produced video frames'); if (outN <= (sg.replayFrames || 0)) { off = 0; continue; } if (sg.raw) sg.chunks[base + outN - 1] = null; if (sg.t0 === undefined) sg.t0 = (pr.nextPts !== undefined ? pr.nextPts : 0); const fp = sg.fps || fps(), pts = sg.t0 + (sg.fn = (sg.fn || 0) + 1, sg.fn - 1) / fp; pr.nextPts = pts + 1 / fp; let sess; if (sg.fmap && sg.fmap.length) { const fn0 = sg.fn - 1; if (sg.fk === undefined) sg.fk = 0; while (sg.fk + 1 < sg.fmap.length && sg.fmap[sg.fk + 1].start <= fn0) sg.fk++; const fm = sg.fmap[sg.fk]; sess = fm.sess0 + (fn0 - fm.start) / fp; } prEnqueue(st, sz, cur, pts, me, rel, sess); cur = pool.pop() || Buffer.allocUnsafe(fsz); off = 0; } } });
+              if (off === fsz) { outN++; if (outN === 1 && hw && hw.enabled) console.log('[gpu] FFmpeg VA-API produced video frames'); if (outN <= (sg.replayFrames || 0)) { off = 0; continue; } if (sg.raw) sg.chunks[chunkBase + outN - 1] = null; if (sg.t0 === undefined) sg.t0 = (pr.nextPts !== undefined ? pr.nextPts : 0); const fp = sg.fps || fps(), pts = sg.t0 + (sg.fn = (sg.fn || 0) + 1, sg.fn - 1) / fp; pr.nextPts = pts + 1 / fp; let sess; if (sg.fmap && sg.fmap.length) { const fn0 = sg.fn - 1; if (sg.fk === undefined) sg.fk = 0; while (sg.fk + 1 < sg.fmap.length && sg.fmap[sg.fk + 1].start <= fn0) sg.fk++; const fm = sg.fmap[sg.fk]; sess = fm.sess0 + (fn0 - fm.start) / fp; } prEnqueue(st, sz, cur, pts, me, rel, sess); cur = pool.pop() || Buffer.allocUnsafe(fsz); off = 0; } } });
         }
-        me.on('close', (code, sig) => { mlog('ffmpeg exit', kind, si, code, sig || '', 'closed=' + !!sg.closed, 'fed=' + fed + '/' + sg.chunks.length); if (proc !== me) return; proc = null;
+        me.on('close', (code, sig) => { mlog('ffmpeg exit', kind, si, code, sig || '', 'closed=' + !!sg.closed, 'fed=' + fed + '/' + sg.chunks.length); if (proc !== me) return; proc = null; if (audioClock.source === me) audioClock.reset();
           if (!dead && hw && hw.enabled && code !== 0) {
             console.error('[gpu] FFmpeg VA-API failed (exit=' + code + ', signal=' + (sig || 'none') + '):\n' + (ffError.trim() || 'No FFmpeg error output'));
             console.error('[gpu] Input: chunks=' + sg.chunks.length + ', fed=' + fed + ', frames=' + outN + ', closed=' + !!sg.closed);
@@ -279,7 +288,7 @@ module.exports = function make(ctx) {
             console.warn('[gpu] VA-API decoding failed; retrying this stream in software');
             software = true; sg.replayFrames = outN; advance(); return;
           }
-          if (kind === 'video' && sg.raw && !sg.closed && !dead && (sg.respawns = (sg.respawns || 0) + 1) <= 20) { sg.resumeFed = base + outN; mlog('ffmpeg video: saida precoce, retomando o segmento', si, 'respawn', sg.respawns, 'quadros reenviados', fed - (base + outN)); advance(); return; }
+          if (kind === 'video' && sg.raw && !sg.closed && !dead && (sg.respawns = (sg.respawns || 0) + 1) <= 20) { sg.resumeFed = chunkBase + outN; mlog('ffmpeg video: saida precoce, retomando o segmento', si, 'respawn', sg.respawns, 'quadros reenviados', fed - (chunkBase + outN)); advance(); return; }
           si++; if (!dead) advance(); });
         return true;
       }

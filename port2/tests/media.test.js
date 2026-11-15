@@ -3,7 +3,7 @@ const cp = require('child_process'), fs = require('fs');
 
 if (process.argv[2] !== 'worker') {
   const { test } = require('node:test');
-  for (const mode of ['clear', 'widevine', 'rgba', 'retry', 'retry-partial', 'required-fail', 'required-unavailable', 'gpu-success', 'init-switch', 'init-only-eos', 'disk-cache', 'disk-widevine', 'disk-gpu', 'audio-sync', 'audio-sync-no-video', 'decrypt-retry', 'decrypt-fail']) {
+  for (const mode of ['clear', 'widevine', 'rgba', 'retry', 'retry-partial', 'required-fail', 'required-unavailable', 'gpu-success', 'init-switch', 'init-only-eos', 'disk-cache', 'disk-widevine', 'disk-gpu', 'audio-sync', 'audio-sync-no-video', 'audio-sync-master', 'decrypt-retry', 'decrypt-fail']) {
     test('video pipeline: ' + mode, () => {
       const result = cp.spawnSync(process.execPath, [__filename, 'worker', mode], { encoding: 'utf8', timeout: 12000 });
       assert.equal(result.status, 0, result.stdout + result.stderr);
@@ -25,7 +25,7 @@ if (process.argv[2] !== 'worker') {
     const init = Buffer.from(mp4.subarray(0, boundary)), frag = mp4.subarray(boundary);
     let attempts = 0;
     let decoderSpawns = 0; const events = [];
-    let videoOutput = false, audioStarted = false, audioStartedEarly = false;
+    let videoOutput = false, audioStarted = false, audioStartedEarly = false, audioProgress = false;
     if (mode.startsWith('audio-sync')) {
       const spawn = cp.spawn;
       cp.spawn = (bin, args, opts) => {
@@ -33,6 +33,13 @@ if (process.argv[2] !== 'worker') {
         if (args.includes('pulse')) {
           audioStartedEarly = !videoOutput;
           audioStarted = true;
+          if (mode === 'audio-sync-master') {
+            assert(args.includes('asetpts=PTS-STARTPTS'));
+            assert(args.includes('pipe:3'));
+            const audio = spawn(process.execPath, ['-e', "const fs=require('fs'); let us=0; const t=setInterval(()=>fs.writeSync(3,'out_time_us='+(us+=40000)+'\\n'),40); process.stdin.resume(); process.stdin.on('end',()=>setTimeout(()=>{clearInterval(t);process.exit(0)},900));"], opts);
+            audio.stdio[3].on('data', () => { audioProgress = true; });
+            return audio;
+          }
           return spawn(process.execPath, ['-e', "process.stdin.resume(); process.stdin.on('end', () => process.exit(0))"], opts);
         }
         const videoScript = mode === 'audio-sync-no-video'
@@ -174,7 +181,8 @@ if (process.argv[2] !== 'worker') {
         await new Promise(r => setTimeout(r, 20));
       }
       assert(frame, 'a frame was presented'); assert.equal(frame.readUInt32LE(8), count, 'all frames presented once');
-      if (mode === 'audio-sync') { assert(audioStarted, 'audio eventually starts'); assert(!audioStartedEarly, 'audio must wait for the first decoded video frame'); }
+      if (mode === 'audio-sync-master') assert(audioProgress, 'audio progress reaches the player through the dedicated pipe');
+      if (mode === 'audio-sync' || mode === 'audio-sync-master') { assert(audioStarted, 'audio eventually starts'); assert(!audioStartedEarly, 'audio must wait for the first decoded video frame'); }
       assert.equal(frame.readUInt32LE(0), mode === 'rgba' ? w : (0x80000000 + w));
       assert.equal(frame.length, 12 + (mode === 'rgba' ? w*h*4 : frameSize));
       if (mode === 'widevine' || mode === 'disk-widevine') assert.equal(frame[12], 81, 'Widevine planar pixels pass through unchanged');
